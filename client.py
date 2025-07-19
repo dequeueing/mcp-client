@@ -25,6 +25,9 @@ class MCPClient:
         
         # Maintain conversation history across queries
         self.messages = []
+        
+        # Resource settings
+        self.auto_include_resources = False
     # methods will go here00
     
     async def connect_to_server(self, server_script_path: str):
@@ -60,13 +63,56 @@ class MCPClient:
         for tool in tools:
             print(f"Tool: {tool.name}, Description: {tool.description}, Input Schema: {tool.inputSchema}")
         
+        # Also list available resources
+        try:
+            resources_response = await self.session.list_resources()
+            resources = resources_response.resources
+            if resources:
+                print(f"\nConnected to server with {len(resources)} resources:")
+                for resource in resources:
+                    print(f"Resource: {resource.name} ({resource.uri})")
+                    if resource.description:
+                        print(f"  Description: {resource.description}")
+                    if resource.mimeType:
+                        print(f"  MIME Type: {resource.mimeType}")
+            else:
+                print("\nNo resources available on this server.")
+        except Exception as e:
+            print(f"\nServer does not support resources or error listing them: {e}")
         
-    async def process_query(self, query: str) -> str:
+        
+    async def list_resources(self):
+        """List all available resources from the server"""
+        try:
+            response = await self.session.list_resources()
+            return response.resources
+        except Exception as e:
+            print(f"Error listing resources: {e}")
+            return []
+    
+    async def read_resource(self, uri: str):
+        """Read a specific resource by URI"""
+        try:
+            response = await self.session.read_resource(uri)
+            return response.contents
+        except Exception as e:
+            print(f"Error reading resource {uri}: {e}")
+            return None
+        
+        
+    async def process_query(self, query: str, include_resources: bool = False) -> str:
         """Process a query using Claude and available tools"""
+        
+        # Optionally enhance query with relevant resource context
+        if include_resources:
+            enhanced_query = await self.add_resource_context(query)
+        else:
+            enhanced_query = query
+            
         # Add user message to persistent conversation history
         self.messages.append({
             "role": "user",
-            "content": query
+            "content": enhanced_query
         })
 
         # Get tools from the already established session (avoid redundant call)
@@ -139,6 +185,49 @@ class MCPClient:
 
         return "\n".join(final_text)
 
+    async def get_relevant_resources(self, query: str, max_resources: int = 3):
+        """Get resources that might be relevant to the query"""
+        resources = await self.list_resources()
+        if not resources:
+            return []
+        
+        # Simple relevance matching - you could make this more sophisticated
+        relevant = []
+        query_lower = query.lower()
+        
+        for resource in resources:
+            # Check if query keywords match resource name or description
+            name_match = any(word in resource.name.lower() for word in query_lower.split())
+            desc_match = resource.description and any(word in resource.description.lower() for word in query_lower.split())
+            
+            if name_match or desc_match:
+                relevant.append(resource)
+        
+        return relevant[:max_resources]
+
+    async def add_resource_context(self, query: str):
+        """Add relevant resource content as context to the conversation"""
+        relevant_resources = await self.get_relevant_resources(query)
+        
+        context_parts = []
+        for resource in relevant_resources:
+            contents = await self.read_resource(resource.uri)
+            if contents:
+                for content in contents:
+                    if hasattr(content, 'text') and content.text:
+                        # Truncate long resources
+                        text = content.text
+                        if len(text) > 1000:
+                            text = text[:1000] + "... (truncated)"
+                        
+                        context_parts.append(f"Resource '{resource.name}' ({resource.uri}):\n{text}")
+        
+        if context_parts:
+            context = "\n\n".join(context_parts)
+            return f"Here are some relevant resources for context:\n\n{context}\n\nUser query: {query}"
+        
+        return query
+
     def clear_chat_history(self):
         """Clear the conversation history"""
         self.messages = []
@@ -148,7 +237,13 @@ class MCPClient:
     async def chat_loop(self):
         """Run an interactive chat loop"""
         print("\nMCP Client Started!")
-        print("Type your queries, 'clear' to reset chat history, or 'quit' to exit.")
+        print("Commands:")
+        print("  - Type your queries for AI interaction")
+        print("  - 'clear' to reset chat history")
+        print("  - 'resources' to list available resources")
+        print("  - 'read <uri>' to read a specific resource")
+        print("  - 'auto-resources on/off' to toggle automatic resource inclusion")
+        print("  - 'quit' to exit")
 
         while True:
             try:
@@ -159,12 +254,79 @@ class MCPClient:
                 elif query.lower() == 'clear':
                     self.clear_chat_history()
                     continue
+                elif query.lower() == 'resources':
+                    await self.handle_list_resources()
+                    continue
+                elif query.lower().startswith('read '):
+                    uri = query[5:].strip()  # Remove 'read ' prefix
+                    await self.handle_read_resource(uri)
+                    continue
+                elif query.lower().startswith('auto-resources '):
+                    setting = query[15:].strip().lower()  # Remove 'auto-resources ' prefix
+                    if setting in ['on', 'true', 'yes']:
+                        self.auto_include_resources = True
+                        print("✓ Automatic resource inclusion enabled")
+                    elif setting in ['off', 'false', 'no']:
+                        self.auto_include_resources = False
+                        print("✓ Automatic resource inclusion disabled")
+                    else:
+                        print("Usage: auto-resources on/off")
+                    continue
 
-                response = await self.process_query(query)
+                response = await self.process_query(query, include_resources=self.auto_include_resources)
                 print("\n" + response)
 
             except Exception as e:
                 print(f"\nError: {str(e)}")
+
+    async def handle_list_resources(self):
+        """Handle the 'resources' command"""
+        resources = await self.list_resources()
+        if resources:
+            print(f"\nAvailable Resources ({len(resources)}):")
+            for i, resource in enumerate(resources, 1):
+                print(f"{i}. {resource.name}")
+                print(f"   URI: {resource.uri}")
+                if resource.description:
+                    print(f"   Description: {resource.description}")
+                if resource.mimeType:
+                    print(f"   MIME Type: {resource.mimeType}")
+                if resource.size:
+                    print(f"   Size: {resource.size} bytes")
+                print()
+        else:
+            print("\nNo resources available.")
+
+    async def handle_read_resource(self, uri: str):
+        """Handle the 'read <uri>' command"""
+        if not uri:
+            print("Please provide a resource URI. Usage: read <uri>")
+            return
+            
+        contents = await self.read_resource(uri)
+        if contents:
+            for content in contents:
+                print(f"\nResource: {content.uri}")
+                if content.mimeType:
+                    print(f"MIME Type: {content.mimeType}")
+                
+                if hasattr(content, 'text') and content.text:
+                    print("Content (text):")
+                    print("-" * 50)
+                    # Truncate very long content
+                    text = content.text
+                    if len(text) > 2000:
+                        text = text[:2000] + "\n... (truncated)"
+                    print(text)
+                    print("-" * 50)
+                elif hasattr(content, 'blob') and content.blob:
+                    print("Content (binary - base64 encoded):")
+                    print(f"Length: {len(content.blob)} characters")
+                    print("Use appropriate tools to decode this binary data.")
+                else:
+                    print("No content available.")
+        else:
+            print(f"Could not read resource: {uri}")
 
     async def cleanup(self):
         """Clean up resources"""
