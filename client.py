@@ -80,6 +80,40 @@ class MCPClient:
         except Exception as e:
             print(f"\nServer does not support resources or error listing them: {e}")
         
+        # Also list available prompts
+        try:
+            prompts_response = await self.session.list_prompts()
+            prompts = prompts_response.prompts
+            if prompts:
+                print(f"\nConnected to server with {len(prompts)} prompts:")
+                for prompt in prompts:
+                    print(f"Prompt: {prompt.name}")
+                    if prompt.description:
+                        print(f"  Description: {prompt.description}")
+            else:
+                print("\nNo prompts available on this server.")
+        except Exception as e:
+            print(f"\nServer does not support prompts or error listing them: {e}")
+        
+        
+    async def list_prompts(self):
+        """List all available prompts from the server"""
+        try:
+            response = await self.session.list_prompts()
+            return response.prompts
+        except Exception as e:
+            print(f"Error listing prompts: {e}")
+            return []
+    
+    async def get_prompt(self, name: str, arguments: dict = None):
+        """Get a specific prompt with arguments"""
+        try:
+            response = await self.session.get_prompt(name, arguments or {})
+            return response
+        except Exception as e:
+            print(f"Error getting prompt {name}: {e}")
+            return None
+        
         
     async def list_resources(self):
         """List all available resources from the server"""
@@ -242,6 +276,8 @@ class MCPClient:
         print("  - 'clear' to reset chat history")
         print("  - 'resources' to list available resources")
         print("  - 'read <uri>' to read a specific resource")
+        print("  - 'prompts' to list available prompts")
+        print("  - 'prompt <name>' to use a prompt")
         print("  - 'auto-resources on/off' to toggle automatic resource inclusion")
         print("  - 'quit' to exit")
 
@@ -260,6 +296,13 @@ class MCPClient:
                 elif query.lower().startswith('read '):
                     uri = query[5:].strip()  # Remove 'read ' prefix
                     await self.handle_read_resource(uri)
+                    continue
+                elif query.lower() == 'prompts':
+                    await self.handle_list_prompts()
+                    continue
+                elif query.lower().startswith('prompt '):
+                    prompt_name = query[7:].strip()  # Remove 'prompt ' prefix
+                    await self.handle_use_prompt(prompt_name)
                     continue
                 elif query.lower().startswith('auto-resources '):
                     setting = query[15:].strip().lower()  # Remove 'auto-resources ' prefix
@@ -327,6 +370,164 @@ class MCPClient:
                     print("No content available.")
         else:
             print(f"Could not read resource: {uri}")
+
+    async def handle_list_prompts(self):
+        """Handle the 'prompts' command"""
+        prompts = await self.list_prompts()
+        if prompts:
+            print(f"\nAvailable Prompts ({len(prompts)}):")
+            for i, prompt in enumerate(prompts, 1):
+                print(f"{i}. {prompt.name}")
+                if prompt.description:
+                    print(f"   Description: {prompt.description}")
+                if prompt.arguments:
+                    print(f"   Arguments:")
+                    for arg in prompt.arguments:
+                        required = " (required)" if arg.required else " (optional)"
+                        print(f"     - {arg.name}{required}: {arg.description or 'No description'}")
+                print()
+        else:
+            print("\nNo prompts available.")
+
+    async def handle_use_prompt(self, prompt_name: str):
+        """Handle using a specific prompt"""
+        if not prompt_name:
+            print("Please provide a prompt name. Usage: prompt <name>")
+            return
+        
+        # Get prompt definition first
+        prompts = await self.list_prompts()
+        prompt_def = None
+        for p in prompts:
+            if p.name == prompt_name:
+                prompt_def = p
+                break
+        
+        if not prompt_def:
+            print(f"Prompt '{prompt_name}' not found. Use 'prompts' to see available prompts.")
+            return
+        
+        # Collect arguments if needed
+        arguments = {}
+        if prompt_def.arguments:
+            print(f"\nPrompt '{prompt_name}' requires arguments:")
+            for arg in prompt_def.arguments:
+                while True:
+                    required_str = " (required)" if arg.required else " (optional)"
+                    prompt_text = f"{arg.name}{required_str}"
+                    if arg.description:
+                        prompt_text += f" - {arg.description}"
+                    
+                    value = input(f"{prompt_text}: ").strip()
+                    
+                    if arg.required and not value:
+                        print("This argument is required. Please provide a value.")
+                        continue
+                    
+                    if value:  # Only add non-empty values
+                        arguments[arg.name] = value
+                    break
+        
+        # Get the prompt with arguments
+        prompt_result = await self.get_prompt(prompt_name, arguments)
+        if not prompt_result:
+            return
+        
+        # Add prompt messages to conversation history and process
+        print(f"\n🎯 Using prompt: {prompt_name}")
+        
+        # Log the message from prompt result
+        print(f"\n🥵 Prompt messages:")
+        for message in prompt_result.messages:
+            # Convert prompt message to OpenAI format
+            if hasattr(message.content, 'text'):
+                content = message.content.text
+            else:
+                content = str(message.content)
+            
+            print(f"\n{message.role}: {content}")
+        
+        
+        # Add each message from the prompt to conversation history
+        for message in prompt_result.messages:
+            # Convert prompt message to OpenAI format
+            if hasattr(message.content, 'text'):
+                content = message.content.text
+            else:
+                content = str(message.content)
+            
+            self.messages.append({
+                "role": message.role,
+                "content": content
+            })
+        
+        # Process the prompt as if it was a regular query
+        response = await self.process_query_from_messages()
+        print("\n" + response)
+
+    async def process_query_from_messages(self) -> str:
+        """Process query using existing messages in conversation history"""
+        # Get tools from the already established session
+        response = await self.session.list_tools()
+        available_tools = [{
+            "type": "function",
+            "function": {
+                "name": tool.name,
+                "description": tool.description,
+                "parameters": tool.inputSchema
+            }
+        } for tool in response.tools]
+
+        # Process with existing conversation history (no new user message to add)
+        response = await self.client.chat.completions.create(
+            # model="anthropic/claude-3-5-sonnet-20241022",
+            model="moonshotai/kimi-k2",
+            max_tokens=1000,
+            messages=self.messages,
+            tools=available_tools if available_tools else None
+        )
+
+        # Handle tool calls the same way as process_query
+        final_text = []
+        max_iterations = 10
+        
+        for iteration in range(max_iterations):
+            assistant_message = response.choices[0].message
+            
+            if assistant_message.content:
+                final_text.append(assistant_message.content)
+
+            if not assistant_message.tool_calls:
+                self.messages.append(assistant_message.model_dump())
+                break
+
+            self.messages.append(assistant_message.model_dump())
+            
+            for tool_call in assistant_message.tool_calls:
+                tool_name = tool_call.function.name
+                tool_args = tool_call.function.arguments
+                
+                if isinstance(tool_args, str):
+                    import json
+                    tool_args = json.loads(tool_args)
+
+                result = await self.session.call_tool(tool_name, tool_args)
+                final_text.append(f"[Calling tool {tool_name} with args {tool_args}]")
+
+                self.messages.append({
+                    "role": "tool",
+                    "tool_call_id": tool_call.id,
+                    "content": str(result.content)
+                })
+
+            response = await self.client.chat.completions.create(
+                model="anthropic/claude-3-5-sonnet-20241022",
+                max_tokens=1000,
+                messages=self.messages,
+                tools=available_tools if available_tools else None
+            )
+
+        return "\n".join(final_text)
 
     async def cleanup(self):
         """Clean up resources"""
