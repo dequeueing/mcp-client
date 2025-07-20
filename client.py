@@ -1,3 +1,19 @@
+"""
+LEGACY CLIENT - ORIGINAL MONOLITHIC IMPLEMENTATION
+
+⚠️  NOTICE: This is the original monolithic client implementation.
+    For the new organized, modular version, see:
+    
+    📁 src/mcp_client/     - Modular client components
+    📁 examples/           - Usage examples (basic_client.py)
+    📁 servers/           - Server implementations
+    
+    To run the new client:
+    python run_client.py
+
+This file is kept for reference and comparison purposes.
+"""
+
 import asyncio
 import os
 from typing import Optional
